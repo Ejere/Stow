@@ -113,8 +113,11 @@ pub fn set_treasury(_env: &Env, _caller: Address, _new_treasury: Address) -> Res
 
 /// The performance fee, in basis points (0-10_000), charged only on positive
 /// yield at `harvest` time. Defaults to `0` before ever set.
-pub fn performance_fee_bps(_env: &Env) -> u32 {
-    unimplemented!("admin: performance_fee_bps")
+pub fn performance_fee_bps(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::PerformanceFeeBps)
+        .unwrap_or(0)
 }
 
 /// Set the performance fee. Admin-only.
@@ -124,10 +127,49 @@ pub fn performance_fee_bps(_env: &Env) -> u32 {
 ///   `fees` module doc for why this cap exists.
 /// - Takes effect on the *next* `harvest` call; does not retroactively
 ///   apply to yield already reported.
+pub fn set_performance_fee_bps(env: &Env, caller: Address, bps: u32) -> Result<(), Error> {
+    caller.require_auth();
+    let current_admin = admin(env)?;
+    if caller != current_admin {
+        return Err(Error::Unauthorized);
+    }
+    crate::fees::validate_fee_bps(bps)?;
+
+    extend_instance_ttl(env);
+    env.storage()
+        .instance()
+        .set(&DataKey::PerformanceFeeBps, &bps);
+    Ok(())
+}
+
+/// Minimum number of seconds between successful `harvest` calls. Defaults
+/// to `0` (no minimum) if unset. See `harvest::check_harvest_interval`.
+pub fn harvest_interval(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&DataKey::HarvestInterval)
+        .unwrap_or(0)
+}
+
+/// Set the minimum interval between `harvest` calls. Admin-only. Mirrors
+/// `set_withdraw_cooldown`'s shape.
 ///
-/// TODO(issue): implement.
-pub fn set_performance_fee_bps(_env: &Env, _caller: Address, _bps: u32) -> Result<(), Error> {
-    unimplemented!("admin: set_performance_fee_bps")
+/// - Requires `require_auth` from the current admin.
+/// - Takes effect on the very next `check_harvest_interval` call.
+pub fn set_harvest_interval(env: &Env, caller: Address, seconds: u64) -> Result<(), Error> {
+    extend_instance_ttl(env);
+
+    let current_admin = storage::get_admin(env).ok_or(Error::NotInitialized)?;
+    caller.require_auth();
+    if caller != current_admin {
+        return Err(Error::Unauthorized);
+    }
+
+    env.storage()
+        .instance()
+        .set(&DataKey::HarvestInterval, &seconds);
+
+    Ok(())
 }
 
 /// Set the emergency-pause flag. Admin-only.

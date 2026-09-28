@@ -72,6 +72,12 @@ pub fn get_admin(env: &Env) -> Option<Address> {
     env.storage().instance().get(&DataKey::Admin)
 }
 
+/// The treasury address that receives collected performance fees, or `None`
+/// before `initialize`.
+pub fn get_treasury(env: &Env) -> Option<Address> {
+    env.storage().instance().get(&DataKey::Treasury)
+}
+
 /// Allocate and persist the next id for the given counter key
 /// (`NextStrategyId` or `NextWithdrawId`).
 ///

@@ -9,8 +9,10 @@
 use soroban_sdk::{Address, Env};
 
 use crate::accounting::mul_div_floor;
+use crate::admin;
 use crate::error::Error;
-use crate::storage;
+use crate::events::TOPIC_FEE_COLLECTED;
+use crate::storage::{self, extend_instance_ttl};
 use crate::types::DataKey;
 
 /// Maximum performance fee, in basis points. Enforced by
@@ -23,10 +25,11 @@ pub const BPS_DENOMINATOR: i128 = 10_000;
 
 /// Validate a proposed performance fee. Errors `Error::FeeTooHigh` if
 /// `bps > MAX_PERFORMANCE_FEE_BPS`.
-///
-/// TODO(issue): implement.
-pub fn validate_fee_bps(_bps: u32) -> Result<(), Error> {
-    unimplemented!("fees: validate_fee_bps")
+pub fn validate_fee_bps(bps: u32) -> Result<(), Error> {
+    if bps > MAX_PERFORMANCE_FEE_BPS {
+        return Err(Error::FeeTooHigh);
+    }
+    Ok(())
 }
 
 /// Read the current accrued-and-unswept fee balance. Defaults to `0`.
@@ -69,8 +72,22 @@ pub fn compute_performance_fee(env: &Env, yield_amount: i128, bps: u32) -> Resul
 ///   reentrant call from a hostile token contract cannot double-spend the
 ///   swept amount.
 /// - Emits a `fee_collected` event.
-///
-/// TODO(issue): implement.
-pub fn withdraw_fees(_env: &Env, _caller: Address) -> Result<i128, Error> {
-    unimplemented!("fees: withdraw_fees")
+pub fn withdraw_fees(env: &Env, caller: Address) -> Result<i128, Error> {
+    let accrued = fees_accrued(env);
+    if accrued <= 0 {
+        return Err(Error::NoFeesAccrued);
+    }
+
+    extend_instance_ttl(env);
+    env.storage().instance().set(&DataKey::FeesAccrued, &0i128);
+
+    let treasury = admin::treasury(env)?;
+    storage::transfer_out(env, &treasury, accrued)?;
+
+    env.events().publish(
+        (TOPIC_FEE_COLLECTED,),
+        (caller, accrued, env.ledger().timestamp()),
+    );
+
+    Ok(accrued)
 }

@@ -174,10 +174,33 @@ pub fn register_strategy(
 /// - A deregistered strategy's id can never be re-registered or reactivated;
 ///   `deregistered_at` is permanent.
 /// - Emits a `strategy_deregistered` event.
-///
-/// TODO(issue): implement.
-pub fn deregister_strategy(_env: &Env, _caller: Address, _strategy_id: u64) -> Result<(), Error> {
-    unimplemented!("strategy: deregister_strategy")
+pub fn deregister_strategy(env: &Env, caller: Address, strategy_id: u64) -> Result<(), Error> {
+    admin::require_admin(env, &caller)?;
+    admin::require_not_paused(env)?;
+
+    let active: Option<u64> = env.storage().instance().get(&DataKey::ActiveStrategy);
+    if active == Some(strategy_id) {
+        return Err(Error::StrategyActive);
+    }
+
+    let key = DataKey::Strategy(strategy_id);
+    let mut info: StrategyInfo = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .ok_or(Error::StrategyNotFound)?;
+
+    extend_instance_ttl(env);
+    info.deregistered_at = Some(env.ledger().timestamp());
+    env.storage().persistent().set(&key, &info);
+    storage::extend_persistent_ttl(env, &key);
+
+    env.events().publish(
+        (events::TOPIC_STRATEGY_DEREGISTERED,),
+        (strategy_id, env.ledger().timestamp()),
+    );
+
+    Ok(())
 }
 
 /// Set the active strategy when there is currently none (first activation
@@ -225,14 +248,80 @@ pub fn set_active_strategy(env: &Env, caller: Address, strategy_id: u64) -> Resu
 /// - Requires `require_auth` from the current admin.
 /// - Withdraws the adapter's full balance from the old strategy, deposits it
 ///   into the new one.
-/// - Must preserve `total_assets()` (module the old strategy's own
+/// - Must preserve `total_assets()` (modulo the old strategy's own
 ///   withdrawal fees/slippage, if any — see the "Strategy interface" doc for
 ///   how those are surfaced and accounted for).
 /// - Emits a `strategy_changed` event with both `from` and `to` ids.
-///
-/// TODO(issue): implement.
-pub fn migrate_strategy(_env: &Env, _caller: Address, _new_strategy_id: u64) -> Result<(), Error> {
-    unimplemented!("strategy: migrate_strategy")
+pub fn migrate_strategy(env: &Env, caller: Address, new_strategy_id: u64) -> Result<(), Error> {
+    admin::require_admin(env, &caller)?;
+    admin::require_not_paused(env)?;
+
+    let old_id: u64 = env
+        .storage()
+        .instance()
+        .get(&DataKey::ActiveStrategy)
+        .ok_or(Error::StrategyNotFound)?;
+    if old_id == new_strategy_id {
+        return Err(Error::StrategyAlreadyActive);
+    }
+
+    let new_info: StrategyInfo = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Strategy(new_strategy_id))
+        .ok_or(Error::StrategyNotFound)?;
+    if new_info.deregistered_at.is_some() {
+        return Err(Error::StrategyNotFound);
+    }
+    let old_info: StrategyInfo = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Strategy(old_id))
+        .ok_or(Error::StrategyNotFound)?;
+
+    let contract_address = env.current_contract_address();
+
+    // Pull the adapter's full balance out of the old strategy, back into
+    // this contract, then push it all into the new one. The strategy
+    // interface's balance()/withdraw()/deposit() shapes are documented in
+    // README.md's "Strategy interface" section.
+    let deployed: i128 = env.invoke_contract(
+        &old_info.address,
+        &soroban_sdk::Symbol::new(env, "balance"),
+        soroban_sdk::vec![env, soroban_sdk::IntoVal::into_val(&contract_address, env)],
+    );
+    if deployed > 0 {
+        let () = env.invoke_contract(
+            &old_info.address,
+            &soroban_sdk::Symbol::new(env, "withdraw"),
+            soroban_sdk::vec![
+                env,
+                soroban_sdk::IntoVal::into_val(&contract_address, env),
+                soroban_sdk::IntoVal::into_val(&deployed, env)
+            ],
+        );
+        let () = env.invoke_contract(
+            &new_info.address,
+            &soroban_sdk::Symbol::new(env, "deposit"),
+            soroban_sdk::vec![
+                env,
+                soroban_sdk::IntoVal::into_val(&contract_address, env),
+                soroban_sdk::IntoVal::into_val(&deployed, env)
+            ],
+        );
+    }
+
+    extend_instance_ttl(env);
+    env.storage()
+        .instance()
+        .set(&DataKey::ActiveStrategy, &new_strategy_id);
+
+    env.events().publish(
+        (events::TOPIC_STRATEGY_CHANGED,),
+        (Some(old_id), new_strategy_id, env.ledger().timestamp()),
+    );
+
+    Ok(())
 }
 
 /// Set a per-strategy deposit cap, in vault-token stroops. `0` means

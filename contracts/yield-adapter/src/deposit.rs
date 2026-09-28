@@ -1,6 +1,6 @@
 //! Deposits — convert vault-token in for shares of the adapter.
 
-use soroban_sdk::{Address, Env};
+use soroban_sdk::{Address, Env, IntoVal, Symbol};
 
 use crate::accounting;
 use crate::admin;

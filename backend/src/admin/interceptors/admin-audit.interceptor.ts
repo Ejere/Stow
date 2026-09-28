@@ -6,8 +6,8 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { Observable } from 'rxjs';
-import { tap } from 'rxjs/operators';
+import { from, Observable } from 'rxjs';
+import { concatMap, map } from 'rxjs/operators';
 import { AdminAuditLog } from '../entities/admin-audit-log.entity';
 
 interface AdminRequest {
@@ -20,6 +20,8 @@ interface AdminRequest {
 
 function resolveAction(method: string, url: string): string {
   const path = url.split('?')[0];
+  if (method === 'GET' && path.endsWith('/admin/savings/overview'))
+    return 'VIEW_SAVINGS_OVERVIEW';
   if (method === 'PATCH' && path.includes('/ban')) return 'BAN_USER';
   if (method === 'PATCH' && path.includes('/unban')) return 'UNBAN_USER';
   if (method === 'PATCH' && path.includes('/role')) return 'UPDATE_USER_ROLE';
@@ -56,7 +58,38 @@ function resolveTarget(
   if (path.includes('/comments'))
     return { target_type: 'comment', target_id: id };
   if (path.includes('/flags')) return { target_type: 'flag', target_id: id };
+  if (path.endsWith('/admin/savings/overview')) {
+    return { target_type: 'savings', target_id: 'overview' };
+  }
   return { target_type: null, target_id: id };
+}
+
+interface BulkResponse {
+  succeeded?: number;
+  failed?: number;
+  results?: { user_id: string; success: boolean; code?: string }[];
+}
+
+function buildMetadata(
+  action: string,
+  body: Record<string, unknown> | undefined,
+  response: unknown,
+): Record<string, unknown> | null {
+  if (action !== 'BULK_USER_ACTION' || !response) return body ?? null;
+
+  // Record per-user outcomes so partial failures are traceable in the log.
+  const { succeeded, failed, results = [] } = response as BulkResponse;
+  return {
+    ...(body ?? {}),
+    outcome: {
+      succeeded,
+      failed,
+      succeeded_ids: results.filter((r) => r.success).map((r) => r.user_id),
+      failures: results
+        .filter((r) => !r.success)
+        .map((r) => ({ user_id: r.user_id, code: r.code })),
+    },
+  };
 }
 
 @Injectable()
@@ -70,10 +103,10 @@ export class AdminAuditInterceptor implements NestInterceptor {
     const req = context.switchToHttp().getRequest<AdminRequest>();
     const { user, method, url, params, body } = req;
 
-    if (!user) return next.handle();
-
     return next.handle().pipe(
-      tap(() => {
+      concatMap((response) => {
+        if (!user) return from([response]);
+
         const action = resolveAction(method, url);
         const { target_type, target_id } = resolveTarget(url, params);
 
@@ -82,10 +115,10 @@ export class AdminAuditInterceptor implements NestInterceptor {
           action,
           target_type,
           target_id,
-          metadata: body ?? null,
+          metadata: buildMetadata(action, body, response),
         });
 
-        void this.auditRepo.save(entry);
+        return from(this.auditRepo.save(entry)).pipe(map(() => response));
       }),
     );
   }
