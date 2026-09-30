@@ -1,3 +1,5 @@
+// TODO(#105): extend with gap/reorg detection for savings events, a
+// rolling-window reconciliation pass, and re-enqueue-on-divergence.
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
